@@ -1,0 +1,1 @@
+# fasdeqos-repositoriy
