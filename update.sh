@@ -4,11 +4,13 @@ if [ "$(id -u)" != 0 ]; then
     U=$(id -un)
     exec doas env "FASD_USER=$U" bash "$0" "$@"
 fi
-command -v pacman >/dev/null || { echo "this script must run on Arch Linux or CachyOS"; exit 1; }
+{ [ -x /System/pkg-backend ] || command -v pacman >/dev/null; } || { echo "this script must run on Arch Linux or CachyOS"; exit 1; }
+PB=/System/pkg-backend; [ -x "$PB" ] || PB=pacman
 FU=${FASD_USER:-${SUDO_USER:-}}
-mkdir -p /usr/local/bin /usr/share/fasdeqos /usr/share/fish/vendor_completions.d /etc/pacman.d/hooks /var/lib/fasdeqos
+mkdir -p /usr/local/bin /usr/share/fasdeqos /usr/share/fish/vendor_conf.d /usr/share/fish/vendor_completions.d /etc/pacman.d/hooks /var/lib/fasdeqos
 cat >/usr/local/bin/pkg <<'EOF_PKG'
 #!/bin/sh
+PB=/System/pkg-backend; [ -x "$PB" ] || PB=pacman
 c=${1:-}
 OW='/usr/share/applications/*,/usr/share/icons/*,/etc/grub.d/*,/etc/ostree*'
 [ $# -gt 0 ] && shift
@@ -24,10 +26,47 @@ case $c in
     rebuild) exec doas dkms autoinstall ;;
     *) echo "usage: pkg install|remove|update|upgrade|sysupgrade|search|list|info|rebuild"; exit 1 ;;
 esac
-if [ "$R" = 1 ] && [ "$(id -u)" != 0 ]; then exec doas pacman "$@"; fi
-exec pacman "$@"
+if [ "$R" = 1 ] && [ "$(id -u)" != 0 ]; then exec doas "$PB" "$@"; fi
+exec "$PB" "$@"
 EOF_PKG
 chmod 755 /usr/local/bin/pkg
+cat >/usr/local/bin/fasd-pkgbackend <<'EOF_FASD_PKGBACKEND'
+#!/bin/sh
+mkdir -p /System
+if [ -f /usr/bin/pacman ] && [ ! -L /usr/bin/pacman ]; then
+    mv -f /usr/bin/pacman /System/pkg-backend
+fi
+exit 0
+EOF_FASD_PKGBACKEND
+chmod 755 /usr/local/bin/fasd-pkgbackend
+cat >/etc/pacman.d/hooks/fasd-pkgbackend.hook <<'EOF_FASD_PKGBACKEND_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = pacman
+
+[Action]
+Description = Moving the package backend into /System
+When = PostTransaction
+Exec = /usr/local/bin/fasd-pkgbackend
+EOF_FASD_PKGBACKEND_HOOK
+chmod 644 /etc/pacman.d/hooks/fasd-pkgbackend.hook
+cat >/usr/share/fish/vendor_conf.d/fasd-ls.fish <<'EOF_FASD_LS_FISH'
+function ls --wraps ls --description 'ls that keeps the system folders out of /'
+    set -l at 0
+    test "$PWD" = /; and set at 1
+    for a in $argv
+        test "$a" = /; and set at 1
+    end
+    if test $at = 1
+        command ls --color=auto --ignore=bin --ignore=boot --ignore=dev --ignore=etc --ignore=home --ignore=lib --ignore=lib64 --ignore=mnt --ignore=opt --ignore=proc --ignore=root --ignore=run --ignore=sbin --ignore=srv --ignore=sys --ignore=tmp --ignore=usr --ignore=var --ignore=lost+found --ignore=swapfile --ignore=.hidden --ignore=.snapshots --ignore=efi $argv
+    else
+        command ls --color=auto $argv
+    end
+end
+EOF_FASD_LS_FISH
+chmod 644 /usr/share/fish/vendor_conf.d/fasd-ls.fish
 cat >/usr/local/bin/fasd-upgrade <<'EOF_FASD_UPGRADE'
 #!/bin/sh
 [ "$(id -u)" = 0 ] || exec doas "$0" "$@"
@@ -69,12 +108,13 @@ mkdir -p /etc/fasdeqos
 cat >/usr/share/fish/vendor_completions.d/pkg.fish <<'EOF_PKG_FISH'
 complete -c pkg -f
 complete -c pkg -n '__fish_use_subcommand' -a 'install remove update upgrade sysupgrade search list info rebuild'
-complete -c pkg -n '__fish_seen_subcommand_from install info' -a '(pacman -Slq)'
-complete -c pkg -n '__fish_seen_subcommand_from remove' -a '(pacman -Qeq)'
+complete -c pkg -n '__fish_seen_subcommand_from install info' -a '(/System/pkg-backend -Slq)'
+complete -c pkg -n '__fish_seen_subcommand_from remove' -a '(/System/pkg-backend -Qeq)'
 EOF_PKG_FISH
 chmod 644 /usr/share/fish/vendor_completions.d/pkg.fish
 cat >/usr/local/bin/fasd-apps <<'EOF_FASD_APPS'
 #!/bin/sh
+PB=/System/pkg-backend; [ -x "$PB" ] || PB=pacman
 D=/Applications
 ST=/var/lib/fasdeqos/apps.list
 AD=/usr/local/share/applications
@@ -89,7 +129,7 @@ if [ -d "$D" ] && [ -f "$LS" ]; then
     done <"$LS"
     if [ -s "$MISS" ] && [ "$(wc -l <"$MISS")" -le 2 ]; then
         while IFS= read -r p; do
-            pacman -Rns --noconfirm "$p" >/dev/null 2>&1
+            "$PB" -Rns --noconfirm "$p" >/dev/null 2>&1
         done <"$MISS"
     fi
     rm -f "$MISS"
@@ -128,13 +168,13 @@ add_appimage() {
 }
 add_pkg() {
     f=$1
-    id=$(pacman -Qp "$f" 2>/dev/null | awk '{print $1}')
+    id=$("$PB" -Qp "$f" 2>/dev/null | awk '{print $1}')
     [ -n "$id" ] || return 0
     case "$f" in
         "$D"/tui/*) ;;
         *) bsdtar -tf "$f" 2>/dev/null | grep -q 'usr/share/applications/.*\.desktop$' || { mv "$f" "$D/tui/" && f=$D/tui/$(basename "$f"); } ;;
     esac
-    pacman -U --noconfirm --needed "$f" >/dev/null 2>&1 || return 0
+    "$PB" -U --noconfirm --needed "$f" >/dev/null 2>&1 || return 0
     record "$f" pkg "$id"
 }
 while IFS= read -r f; do
@@ -154,7 +194,7 @@ while IFS="	" read -r f kind id; do
     else
         case "$kind" in
             appimage) rm -f "$AD/fasd-$id.desktop" "$ID/$id.png" ;;
-            pkg) pacman -Rns --noconfirm "$id" >/dev/null 2>&1 ;;
+            pkg) "$PB" -Rns --noconfirm "$id" >/dev/null 2>&1 ;;
         esac
     fi
 done <"$OLD"
@@ -186,6 +226,7 @@ EOF_FASD_APPS_PATH
 chmod 644 /etc/systemd/system/fasd-apps.path
 cat >/usr/local/bin/fasd-layout <<'EOF_FASD_LAYOUT'
 #!/bin/sh
+PB=/System/pkg-backend; [ -x "$PB" ] || PB=pacman
 exec 9>/run/fasd-apps.lock
 flock -n 9 || exit 0
 SL=/usr/share/fasdeqos/system.list
@@ -204,12 +245,13 @@ ln -sfn /dev /System/Kernel/Devices
 ln -sfn /sys /System/Kernel/Objects
 ln -sfn /proc /System/Kernel/Status
 [ -e /Users ] || ln -s /home /Users
+rmdir /mnt /srv /opt /home 2>/dev/null
 for fw in gtk3:GTK3 gtk4:GTK4 qt5-base:Qt5 qt6-base:Qt6 mesa:Mesa vulkan-icd-loader:Vulkan; do
     p=${fw%%:*}
     n=${fw##*:}
-    if pacman -Qq "$p" >/dev/null 2>&1; then
+    if "$PB" -Qq "$p" >/dev/null 2>&1; then
         mkdir -p "/System/Frameworks/$n"
-        pacman -Q "$p" >"/System/Frameworks/$n/Info"
+        "$PB" -Q "$p" >"/System/Frameworks/$n/Info"
         ln -sfn /usr/lib "/System/Frameworks/$n/lib"
         ln -sfn /usr/include "/System/Frameworks/$n/include"
         ln -sfn /usr/share "/System/Frameworks/$n/share"
@@ -228,11 +270,11 @@ if [ -x /usr/local/bin/FasdQuery ] && [ ! -d /Applications/FasdQuery.app ]; then
     [ -n "$(awk -F: '$3 == 1000 {print $1; exit}' /etc/passwd)" ] && chown -R "$(awk -F: '$3 == 1000 {print $1; exit}' /etc/passwd):$(awk -F: '$3 == 1000 {print $1; exit}' /etc/passwd)" /Applications/FasdQuery.app
 fi
 WANT=$(mktemp)
-for p in $(pacman -Qeq); do
+for p in $("$PB" -Qeq); do
     grep -qx "$p" "$SL" 2>/dev/null && continue
-    files=$(pacman -Qlq "$p" 2>/dev/null)
+    files=$("$PB" -Qlq "$p" 2>/dev/null)
     desk=$(printf '%s\n' "$files" | grep '^/usr/share/applications/.*\.desktop$' | head -n 1)
-    ver=$(pacman -Q "$p" | awk '{print $2}')
+    ver=$("$PB" -Q "$p" | awk '{print $2}')
     if [ -n "$desk" ]; then
         name=$(sed -n 's/^Name=//p' "$desk" | head -n 1)
         [ -n "$name" ] || name=$p
@@ -426,9 +468,10 @@ EOF_FASD_OUTPUTS
 chmod 755 /usr/local/bin/fasd-outputs
 cat >/usr/local/bin/fasd-fasdquery <<'EOF_FASD_FASDQUERY'
 #!/bin/sh
+PB=/System/pkg-backend; [ -x "$PB" ] || PB=pacman
 [ "$(id -u)" = 0 ] || exec doas "$0" "$@"
 T=$(mktemp -d)
-pacman -S --needed --asdeps --noconfirm cmake ninja gcc qt6-svg git >/dev/null 2>&1
+"$PB" -S --needed --asdeps --noconfirm cmake ninja gcc qt6-svg git >/dev/null 2>&1
 if git clone --depth 1 https://github.com/Fasdeq13/FasdQuery.git "$T/src" >/dev/null 2>&1 \
     && cmake -S "$T/src" -B "$T/b" -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 \
     && ninja -C "$T/b" >/dev/null 2>&1; then
@@ -587,22 +630,22 @@ EOF_LOGO
 printf 'NAME="FasdeqOS"\nPRETTY_NAME="FasdeqOS"\nID=fasdeqos\nID_LIKE=arch\nVERSION_ID=0.5\nBUILD_ID=rolling\nANSI_COLOR="38;2;226;177;51"\nLOGO=fasdeqos\nHOME_URL="https://github.com/Fasdeq13"\n' >/etc/os-release
 sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 for f in /usr/share/applications/lstopo.desktop /usr/share/applications/discord.desktop /etc/ostree-mkinitcpio.conf /etc/grub.d/15_ostree; do
-    [ -e "$f" ] && ! pacman -Qo "$f" >/dev/null 2>&1 && rm -f "$f"
+    [ -e "$f" ] && ! "$PB" -Qo "$f" >/dev/null 2>&1 && rm -f "$f"
 done
-pacman -Sy --noconfirm
+"$PB" -Sy --noconfirm
 DEL=""
 for p in grub grub-btrfs os-prober ostree alacritty chromium gnome-text-editor easyeffects localsend; do
-    pacman -Qq "$p" >/dev/null 2>&1 && DEL="$DEL $p"
+    "$PB" -Qq "$p" >/dev/null 2>&1 && DEL="$DEL $p"
 done
-[ -n "$DEL" ] && pacman -Rns --noconfirm $DEL
+[ -n "$DEL" ] && "$PB" -Rns --noconfirm $DEL
 rm -rf /boot/grub /etc/default/grub /etc/grub.d
 OW='/usr/share/applications/*,/usr/share/icons/*,/etc/grub.d/*,/etc/ostree*'
 WANT=$(grep -v '^#' /usr/share/fasdeqos/packages.installed | tr '\n' ' ')
 for p in steam nautilus-open-any-terminal; do
-    pacman -Si "$p" >/dev/null 2>&1 && WANT="$WANT $p"
+    "$PB" -Si "$p" >/dev/null 2>&1 && WANT="$WANT $p"
 done
-pacman -S --needed --noconfirm --overwrite "$OW" $WANT
-pacman -Syu --noconfirm --overwrite "$OW"
+"$PB" -S --needed --noconfirm --overwrite "$OW" $WANT
+"$PB" -Syu --noconfirm --overwrite "$OW"
 /usr/local/bin/fasd-fasdquery
 systemctl daemon-reload
 systemctl enable --now fasd-apps.path >/dev/null 2>&1
@@ -704,7 +747,7 @@ binds {
     Print { screenshot; }
     Mod+V { spawn "noctalia" "msg" "panel-toggle" "clipboard"; }
     Alt+Space { spawn "noctalia" "msg" "panel-toggle" "launcher"; }
-    Ctrl+Shift+A { spawn "noctalia" "msg" "panel-toggle" "control-center"; }
+    Mod+Shift+A { spawn "noctalia" "msg" "panel-toggle" "control-center"; }
     XF86AudioRaiseVolume allow-when-locked=true { spawn "noctalia" "msg" "volume-up"; }
     XF86AudioLowerVolume allow-when-locked=true { spawn "noctalia" "msg" "volume-down"; }
     XF86AudioMute allow-when-locked=true { spawn "noctalia" "msg" "volume-mute"; }
@@ -798,4 +841,5 @@ EOP
     chown -R "$u:$(id -gn "$u")" "$C"
 done
 /usr/local/bin/fasd-layout
+/usr/local/bin/fasd-pkgbackend
 echo "FasdeqOS updated. Log out and back in to apply the new configuration."
