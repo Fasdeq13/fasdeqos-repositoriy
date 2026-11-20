@@ -17,7 +17,13 @@ OW='/usr/share/applications/*,/usr/share/icons/*,/etc/grub.d/*,/etc/ostree*'
 SYS=0
 if [ "${1:-}" = --system ]; then SYS=1; shift; fi
 case $c in
-    install|add) set -- -S --needed --overwrite "$OW" "$@"; R=1 ;;
+    install|add)
+        EXTRA=""
+        for a in "$@"; do
+            case "$a" in linux-lts|linux-zen|linux-rt|linux-rt-lts|linux-hardened|linux-mainline) [ -x /usr/bin/dkms ] && EXTRA="$EXTRA $a-headers" ;; esac
+        done
+        set -- -S --needed --overwrite "$OW" "$@" $EXTRA
+        R=1 ;;
     remove|delete) set -- -Rns "$@"; R=1 ;;
     update) set -- -Sy; R=1 ;;
     upgrade) exec doas /usr/local/bin/fasd-upgrade ;;
@@ -293,16 +299,26 @@ if [ -x /usr/local/bin/FasdQuery ] && [ ! -d /Applications/FasdQuery.app ]; then
     [ -n "$(awk -F: '$3 == 1000 {print $1; exit}' /etc/passwd)" ] && chown -R "$(awk -F: '$3 == 1000 {print $1; exit}' /etc/passwd):$(awk -F: '$3 == 1000 {print $1; exit}' /etc/passwd)" /Applications/FasdQuery.app
 fi
 WANT=$(mktemp)
-rm -rf /System/Packages
-mkdir -p /System/Packages /Applications/shells
+rm -rf /System/Packages /System/Kernels
+mkdir -p /System/Packages /System/Kernels /Applications/shells
 VERS=$(mktemp)
 "$PB" -Q >"$VERS"
 sysmark() {
     mkdir -p "/System/Packages/$1"
     awk -v n="$1" '$1 == n {print $1, $2}' "$VERS" >"/System/Packages/$1/Info"
 }
+kern() {
+    kd=/System/Kernels/$1
+    mkdir -p "$kd"
+    awk -v n="$1" '$1 == n {print $1, $2}' "$VERS" >"$kd/Info"
+    ln -sfn "/boot/vmlinuz-$1" "$kd/vmlinuz"
+    ln -sfn "/boot/initramfs-$1.img" "$kd/initramfs"
+    km=$("$PB" -Qlq "$1" 2>/dev/null | sed -n 's#^\(/usr/lib/modules/[^/]*\)/vmlinuz$#\1#p' | head -n 1)
+    [ -n "$km" ] && ln -sfn "$km" "$kd/Modules"
+}
 for p in $("$PB" -Qeq); do
     if grep -qx "$p" "$SL" 2>/dev/null || grep -qx "$p" /etc/fasdeqos/system.local 2>/dev/null; then sysmark "$p"; continue; fi
+    case "$p" in linux|linux-lts|linux-zen|linux-rt|linux-rt-lts|linux-hardened|linux-mainline|linux-xanmod*|linux-cachyos*|linux-tkg*) kern "$p"; sysmark "$p"; continue ;; esac
     case "$p" in linux|linux-*|*-headers|*-dkms|*-ucode|nvidia*|lib32-*|*-firmware|*-utils) sysmark "$p"; continue ;; esac
     case "$p" in quickshell|noctalia*|waybar|dms|dms-*|dankmaterialshell*) shell=1; TB=/Applications/shells ;; *) shell=0; TB=/Applications/tui ;; esac
     files=$("$PB" -Qlq "$p" 2>/dev/null)
@@ -348,6 +364,7 @@ EOF_FASD_LAYOUT
 chmod 755 /usr/local/bin/fasd-layout
 cat >/usr/share/fasdeqos/system.list <<'EOF_SYSTEM_LIST'
 base
+fuse2
 linux
 linux-firmware
 linux-headers
@@ -458,7 +475,6 @@ if [ ! -f "$M" ]; then
             echo "file://$d $(basename "$d")"
         done
     } >"$HOME/.config/gtk-3.0/bookmarks"
-    starship preset catppuccin-powerline -o "$HOME/.config/starship.toml" 2>/dev/null
     gsettings set org.gnome.desktop.interface icon-theme Papirus-Dark
     gsettings set org.gnome.desktop.interface color-scheme prefer-dark
     gsettings set org.gnome.desktop.interface gtk-theme Adwaita-dark
@@ -552,7 +568,7 @@ blkid | while IFS= read -r l; do
     cm=$(findmnt -rno TARGET "$dev" 2>/dev/null | head -n 1)
     case "$cm" in /|/boot|/boot/*|/efi|/Users) continue ;; esac
     sz=$(awk -v d="${dev#/dev/}" '$4 == d {printf "%.1fG", $3/1048576}' /proc/partitions)
-    echo "$dev|$uuid|$typ|${lab:-${dev#/dev/}}|$sz|defaults|0" >>"$LIST"
+    echo "$dev|$uuid|$typ|${lab:-${dev#/dev/}}|$sz|defaults,nofail,x-gvfs-show|0" >>"$LIST"
 done
 N=$(wc -l <"$LIST")
 [ "$N" -gt 0 ] || { echo "$T3"; rm -f "$LIST"; exit 0; }
@@ -582,7 +598,7 @@ while :; do
     case "$k" in
         q) exit 0;;
         " ") s=$(getfield "$cur" 7); [ "$s" = 1 ] && s=0 || s=1; setfield "$cur" 7 "$s";;
-        o) printf '\033[?25h\n%s' "$T4"; stty "$OLD"; read -r o; stty -icanon -echo min 1 time 0; printf '\033[?25l'; [ -n "$o" ] || o=defaults; setfield "$cur" 6 "$o";;
+        o) printf '\033[?25h\n%s' "$T4"; stty "$OLD"; read -r o; stty -icanon -echo min 1 time 0; printf '\033[?25l'; [ -n "$o" ] || o=defaults; case "$o" in *x-gvfs-show*) ;; *) o="$o,nofail,x-gvfs-show" ;; esac; setfield "$cur" 6 "$o";;
         j) [ "$cur" -lt "$N" ] && cur=$((cur+1));;
         k) [ "$cur" -gt 1 ] && cur=$((cur-1));;
         "$(printf '\n')"|"")
@@ -3674,6 +3690,155 @@ fixed="JetBrainsMono Nerd Font,10,-1,5,50,0,0,0,0,0"
 general="JetBrainsMono Nerd Font,10,-1,5,50,0,0,0,0,0"
 EOF_THEME_QT6CT_CONF
 chmod 644 /usr/share/fasdeqos/theme/qt6ct.conf
+cat >/usr/share/fasdeqos/theme/starship.toml <<'EOF_THEME_STARSHIP_TOML'
+format = """
+[](fg:bg1)\
+$username\
+[](bg:bg2 fg:bg1)\
+$directory\
+[](bg:bg3 fg:bg2)\
+$git_branch\
+$git_status\
+[](bg:bg4 fg:bg3)\
+$c$rust$golang$nodejs$php$java$python\
+[](fg:bg4)\
+$cmd_duration\
+$line_break\
+$character"""
+
+palette = 'fasd'
+
+[palettes.fasd]
+bg1 = '#151515'
+bg2 = '#202020'
+bg3 = '#2b2b2b'
+bg4 = '#383838'
+fg = '#e6e6e6'
+dim = '#8a8a8a'
+ok = '#6ee7a0'
+err = '#ff5449'
+
+[username]
+show_always = true
+style_user = 'bg:bg1 fg:fg'
+style_root = 'bg:bg1 fg:err'
+format = '[ $user ]($style)'
+
+[directory]
+style = 'bg:bg2 fg:fg'
+format = '[ $path ]($style)'
+truncation_length = 3
+truncation_symbol = '…/'
+
+[directory.substitutions]
+'Documents' = '󰈙 '
+'Downloads' = ' '
+'Music' = '󰝚 '
+'Pictures' = ' '
+
+[git_branch]
+symbol = ''
+style = 'bg:bg3 fg:fg'
+format = '[ $symbol $branch ]($style)'
+
+[git_status]
+style = 'bg:bg3 fg:dim'
+format = '[$all_status$ahead_behind ]($style)'
+
+[nodejs]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[c]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[rust]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[golang]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[php]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[java]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[python]
+symbol = ''
+style = 'bg:bg4 fg:fg'
+format = '[ $symbol( $version) ]($style)'
+
+[cmd_duration]
+min_time = 2000
+style = 'fg:dim'
+format = '[ $duration]($style)'
+
+[character]
+success_symbol = '[❯](bold fg:ok)'
+error_symbol = '[❯](bold fg:err)'
+vimcmd_symbol = '[❮](bold fg:ok)'
+
+[os]
+disabled = true
+EOF_THEME_STARSHIP_TOML
+chmod 644 /usr/share/fasdeqos/theme/starship.toml
+cat >/usr/local/bin/fasd-kernels <<'EOF_FASD_KERNELS'
+#!/bin/sh
+E=/boot/loader/entries
+B=$E/fasdeqos.conf
+[ -f "$B" ] || exit 0
+OPT=$(sed -n 's/^options //p' "$B" | head -n 1)
+UC=$(sed -n 's#^initrd \(/[a-z]*-ucode.img\)$#\1#p' "$B" | head -n 1)
+for k in /boot/vmlinuz-*; do
+    [ -f "$k" ] || continue
+    n=${k#/boot/vmlinuz-}
+    [ "$n" = linux ] && continue
+    [ -f "/boot/initramfs-$n.img" ] || continue
+    {
+        echo "title FasdeqOS ($n)"
+        echo "linux /vmlinuz-$n"
+        [ -n "$UC" ] && echo "initrd $UC"
+        echo "initrd /initramfs-$n.img"
+        echo "options $OPT"
+    } >"$E/fasdeqos-$n.conf"
+done
+for f in "$E"/fasdeqos-*.conf; do
+    [ -f "$f" ] || continue
+    n=${f#"$E"/fasdeqos-}
+    n=${n%.conf}
+    [ "$n" = fallback ] && continue
+    [ -f "/boot/vmlinuz-$n" ] || rm -f "$f"
+done
+exit 0
+EOF_FASD_KERNELS
+chmod 755 /usr/local/bin/fasd-kernels
+cat >/etc/pacman.d/hooks/fasd-kernels.hook <<'EOF_FASD_KERNELS_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = linux
+Target = linux-*
+
+[Action]
+Description = Updating kernel boot entries
+When = PostTransaction
+Exec = /usr/local/bin/fasd-kernels
+EOF_FASD_KERNELS_HOOK
+chmod 644 /etc/pacman.d/hooks/fasd-kernels.hook
 cat >/usr/share/fasdeqos/black.conf <<'EOF_THEME_BLACK_CONF'
 [ColorScheme]
 active_colors=#ffe6e6e6, #ff0a0a0a, #ff1c1c1c, #ff141414, #ff000000, #ff0f0f0f, #ffe6e6e6, #ffffffff, #ffe6e6e6, #ff000000, #ff050505, #ff000000, #ff4a4a4a, #ffffffff, #ff8ab4f8, #ffb388ff, #ff0a0a0a, #ff000000, #ff0a0a0a, #ffe6e6e6, #ff777777, #ffb0b0b0
@@ -3725,6 +3890,7 @@ xdg-desktop-portal-gtk
 polkit-gnome
 gnome-keyring
 gvfs
+fuse2
 xdg-user-dirs
 fish
 starship
@@ -3990,6 +4156,7 @@ EOP
     mkdir -p "$C/quickshell" "$C/gtk-3.0" "$C/gtk-4.0" "$C/qt6ct"
     cp -f /usr/share/fasdeqos/quickshell/*.qml "$C/quickshell/"
     cp -f /usr/share/fasdeqos/theme/gtk.css "$C/gtk-3.0/gtk.css"
+    cp -f /usr/share/fasdeqos/theme/starship.toml "$C/starship.toml"
     cp -f /usr/share/fasdeqos/theme/gtk.css "$C/gtk-4.0/gtk.css"
     cp -f /usr/share/fasdeqos/theme/qt6ct.conf "$C/qt6ct/qt6ct.conf"
     : >"$C/niri/colors.kdl"
@@ -3998,9 +4165,17 @@ EOP
     for f in gtk-3.0 gtk-4.0 qt5ct qt6ct ghostty fish btop; do
         grep -rIl -i noctalia "$C/$f" 2>/dev/null | while read -r x; do sed -i '/[Nn]octalia/d' "$x"; done
     done
-    rm -f "$C/fasdeqos/first-done" "$C/starship.toml"
+    rm -f "$C/fasdeqos/first-done"
     chown -R "$u:$(id -gn "$u")" "$C"
 done
+sed -i 's/ quiet//;s/ loglevel=3//' /boot/loader/entries/*.conf 2>/dev/null
+awk '$2 ~ /^\/Mount\// && $4 !~ /x-gvfs-show/ {$4 = $4",nofail,x-gvfs-show"} {print}' OFS='\t' /etc/fstab >/etc/fstab.new && cat /etc/fstab.new >/etc/fstab
+rm -f /etc/fstab.new
+systemctl daemon-reload
+for m in /Mount/*; do
+    mountpoint -q "$m" 2>/dev/null && umount "$m" 2>/dev/null && mount "$m" 2>/dev/null
+done
+/usr/local/bin/fasd-kernels
 if [ ! -f /var/lib/fasdeqos/shells-v1 ]; then
     : >/var/lib/fasdeqos/layout.list
     rm -rf /Applications/*.app /Applications/tui/*
